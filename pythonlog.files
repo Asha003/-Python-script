@@ -1,0 +1,170 @@
+import re
+import csv
+import matplotlib.pyplot as plt
+import pandas as pd
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import smtplib
+
+# Function to parse a log file and analyze data
+def parse_log_line(line, failed_login_threshold=10):
+    ip_count = defaultdict(int)
+    endpoint_count = defaultdict(int)
+    failed_login_count = defaultdict(int)
+
+    # Regular expressions for extracting IPs, endpoints, and failed logins
+    ip_pattern = re.compile(r'^(\d+\.\d+\.\d+\.\d+)')
+    endpoint_pattern = re.compile(r'\"[A-Z]+\s([^\s]+)\sHTTP')
+    failed_login_pattern = re.compile(r'401')
+
+    # Extract IP address
+    ip_match = ip_pattern.match(line)
+    if ip_match:
+        ip_address = ip_match.group(1)
+        ip_count[ip_address] += 1
+    
+    # Extract endpoint
+    endpoint_match = endpoint_pattern.search(line)
+    if endpoint_match:
+        endpoint = endpoint_match.group(1)
+        endpoint_count[endpoint] += 1
+    
+    # Detect failed login attempts (HTTP status 401)
+    if failed_login_pattern.search(line):
+        ip_match = ip_pattern.match(line)
+        if ip_match:
+            ip_address = ip_match.group(1)
+            failed_login_count[ip_address] += 1
+
+    return ip_count, endpoint_count, failed_login_count
+
+# Function to parse the log file with parallel processing
+def parse_log(file_path, failed_login_threshold=10):
+    ip_count = defaultdict(int)
+    endpoint_count = defaultdict(int)
+    failed_login_count = defaultdict(int)
+
+    with open(file_path, 'r') as log_file:
+        with ThreadPoolExecutor() as executor:
+            results = executor.map(lambda line: parse_log_line(line, failed_login_threshold), log_file)
+            for ip_data, endpoint_data, failed_data in results:
+                for ip, count in ip_data.items():
+                    ip_count[ip] += count
+                for endpoint, count in endpoint_data.items():
+                    endpoint_count[endpoint] += count
+                for ip, count in failed_data.items():
+                    failed_login_count[ip] += count
+
+    # Flag suspicious IPs with failed login attempts exceeding the threshold
+    suspicious_ips = {ip: count for ip, count in failed_login_count.items() if count > failed_login_threshold}
+
+    return ip_count, endpoint_count, suspicious_ips
+
+# Function to send an email alert
+def send_alert(email, subject, message):
+    from_email = "your_email@example.com"
+    to_email = email
+    msg = MIMEMultipart()
+    msg['From'] = from_email
+    msg['To'] = to_email
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(message, 'plain'))
+    server = smtplib.SMTP('smtp.example.com', 587)
+    server.starttls()
+    server.login(from_email, "your_password")
+    server.sendmail(from_email, to_email, msg.as_string())
+    server.quit()
+
+# Function to visualize data with matplotlib
+def visualize_data(ip_count, endpoint_count):
+    # Visualize IP request count
+    ip_data = pd.DataFrame(ip_count.items(), columns=["IP Address", "Request Count"])
+    ip_data_sorted = ip_data.sort_values(by="Request Count", ascending=False).head(10)
+    ip_data_sorted.plot(kind="bar", x="IP Address", y="Request Count", title="Top 10 IPs by Request Count")
+    plt.xlabel("IP Address")
+    plt.ylabel("Request Count")
+    plt.show()
+
+    # Visualize most accessed endpoints
+    endpoint_data = pd.DataFrame(endpoint_count.items(), columns=["Endpoint", "Access Count"])
+    endpoint_data_sorted = endpoint_data.sort_values(by="Access Count", ascending=False).head(10)
+    endpoint_data_sorted.plot(kind="bar", x="Endpoint", y="Access Count", title="Top 10 Most Accessed Endpoints")
+    plt.xlabel("Endpoint")
+    plt.ylabel("Access Count")
+    plt.show()
+
+# Function to print IP request counts
+def print_ip_request_count(ip_count):
+    print("IP Address           Request Count")
+    for ip, count in sorted(ip_count.items(), key=lambda x: x[1], reverse=True):
+        print(f"{ip:<20} {count}")
+
+# Function to print the most accessed endpoint
+def print_most_accessed_endpoint(endpoint_count):
+    if endpoint_count:
+        most_accessed = max(endpoint_count, key=endpoint_count.get)
+        print(f"\nMost Frequently Accessed Endpoint: {most_accessed}")
+        print(f"Accessed {endpoint_count[most_accessed]} times")
+    else:
+        print("\nNo endpoints accessed")
+
+# Function to print suspicious activity (failed login attempts)
+def print_suspicious_activity(suspicious_ips):
+    if suspicious_ips:
+        print("\nSuspicious Activity Detected:")
+        print("IP Address           Failed Login Attempts")
+        for ip, count in sorted(suspicious_ips.items(), key=lambda x: x[1], reverse=True):
+            print(f"{ip:<20} {count}")
+    else:
+        print("\nNo suspicious activity detected")
+
+# Function to save results to a CSV file
+def save_results_to_csv(ip_count, endpoint_count, suspicious_ips, filename="log_analysis_results.csv"):
+    with open(filename, mode='w', newline='') as file:
+        writer = csv.writer(file)
+
+        # Write IP Request Counts
+        writer.writerow(["IP Address", "Request Count"])
+        for ip, count in sorted(ip_count.items(), key=lambda x: x[1], reverse=True):
+            writer.writerow([ip, count])
+
+        # Write Most Accessed Endpoint
+        writer.writerow([])
+        writer.writerow(["Endpoint", "Access Count"])
+        most_accessed = max(endpoint_count, key=endpoint_count.get)
+        writer.writerow([most_accessed, endpoint_count[most_accessed]])
+
+        # Write Suspicious Activity
+        writer.writerow([])
+        writer.writerow(["IP Address", "Failed Login Count"])
+        for ip, count in sorted(suspicious_ips.items(), key=lambda x: x[1], reverse=True):
+            writer.writerow([ip, count])
+
+# Main function to run the analysis
+def main():
+    log_file_path = 'sample.log'  # Replace with your actual log file path
+    failed_login_threshold = 10
+
+    # Parse the log file
+    ip_count, endpoint_count, suspicious_ips = parse_log(log_file_path, failed_login_threshold)
+
+    # Print results
+    print_ip_request_count(ip_count)
+    print_most_accessed_endpoint(endpoint_count)
+    print_suspicious_activity(suspicious_ips)
+
+    # Send email alert if suspicious activity is detected
+    if suspicious_ips:
+        send_alert("admin@example.com", "Suspicious Activity Detected", f"Suspicious IPs: {suspicious_ips}")
+
+    # Visualize data
+    visualize_data(ip_count, endpoint_count)
+
+    # Save the results to a CSV file
+    save_results_to_csv(ip_count, endpoint_count, suspicious_ips)
+
+if __name__ == "__main__":
+    main()
